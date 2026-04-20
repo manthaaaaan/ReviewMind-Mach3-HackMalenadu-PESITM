@@ -12,6 +12,10 @@ app.use(cors({ origin: ALLOWED_ORIGIN }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+app.get('/', (req, res) => {
+  res.send('ReviewMind API is running ✅');
+});
+
 // ─── Gemini Proxy ────────────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -120,14 +124,7 @@ app.post('/api/scrape', async (req, res) => {
 
     console.log(`[Scraper] Attempting to scrape: ${url}`);
 
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml',
-        'Accept-Language': 'en-US,en;q=0.9'
-      },
-      timeout: 10000
-    });
+    const response = await axios.get(`http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(url)}&render=true`);
 
     const html = response.data;
     const lowHtml = html.toLowerCase();
