@@ -1,0 +1,3 @@
+# Mark data files as vendored to exclude them from GitHub language statistics
+review-mind/amazon.html linguist-vendored
+review-mind/test_reviews.csv linguist-vendored
