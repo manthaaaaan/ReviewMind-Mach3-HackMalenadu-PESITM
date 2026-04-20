@@ -124,10 +124,12 @@ app.post('/api/scrape', async (req, res) => {
 
     console.log(`[Scraper] Attempting to scrape: ${url}`);
 
+    // Using ScraperAPI with JavaScript rendering
     const response = await axios.get(`http://api.scraperapi.com?api_key=${process.env.SCRAPER_API_KEY}&url=${encodeURIComponent(url)}&render=true`);
 
     const html = response.data;
     const lowHtml = html.toLowerCase();
+    const $ = cheerio.load(html);
 
     // ─── Bot Detection ───────────────────────────────────────────────────────
     const botIndicators = ["captcha", "robot check", "automated access", "security reach", "access denied", "ddos-guard", "cloudflare"];
@@ -138,10 +140,7 @@ app.post('/api/scrape', async (req, res) => {
        });
     }
 
-    const $ = cheerio.load(html);
-
-    // Metadata extraction
-    // Metadata extraction
+    // Metadata extraction (Product Info)
     const resolveUrl = (path, base) => {
       try {
         if (!path) return null;
@@ -169,99 +168,92 @@ app.post('/api/scrape', async (req, res) => {
 
     const reviews = [];
     const seenTexts = new Set();
-    const seenImages = new Set();
+    
+    // ─── Site-Specific Extraction ──────────────────────────────────────────
+    const isAmazon = url.includes('amazon');
+    const isTrustpilot = url.includes('trustpilot');
 
-    // ─── Primary Selectors (Multi-site) ──────────────────────────────────────
-    const primarySelectors = [
-       'article', 
-       'span[data-hook="review-body"]', 
-       '[class*="review-content"]',
-       '[class*="review-text"]',
-       '[class*="comment-text"]',
-       '[class*="review-body"]',
-       '[data-testid*="review"]',
-       '.typography_body-l__KUYFJ',
-       '.styles_reviewContent__0Q2Tg',
-       '.review-item',
-       '.comment-content'
-    ].join(', ');
+    if (isAmazon) {
+      $('[data-hook="review"]').each((_, el) => {
+        const text = $(el).find('[data-hook="review-body"] span').text().trim();
+        const rating = $(el).find('[data-hook="review-star-rating"] .a-icon-alt, [data-hook="cmps-review-star-rating"] .a-icon-alt').text().trim();
+        const author = $(el).find('[data-hook="profile-name"]').text().trim();
+        const date = $(el).find('[data-hook="review-date"]').text().trim();
+        const title = $(el).find('[data-hook="review-title"] span').text().trim();
+        
+        let images = [];
+        $(el).find('img').each((_, img) => {
+          const src = resolveUrl($(img).attr('src'), url);
+          if (src && !src.includes('avatar') && !src.includes('profile')) images.push(src);
+        });
 
-    let nodes = $(primarySelectors);
-
-    // ─── Smart Fallback: Text Cluster Detection ─────────────────────────────
-    if (nodes.length === 0) {
-       console.log("[Scraper] No reviews found with primary selectors. Running Fallback Cluster Scan...");
-       $('div, span, p').each((_, el) => {
-          const text = $(el).text().trim();
-          if (text.length > 50 && text.length < 2000) {
-             const parent = $(el).parent();
-             if (parent.children().length > 2) { // Likely a list/grid of reviews
-                nodes = nodes.add(el);
-             }
-          }
-       });
-    }
-
-    const cleanScrapedText = (t) => {
-      if (!t) return "";
-      return t.replace(/Read more|Show more|Collapse|\.\.\.|…/gi, '').trim();
-    };
-
-    const isSubset = (newT) => {
-      const cleanNew = cleanScrapedText(newT).toLowerCase();
-      if (cleanNew.length < 3) return true; // Only discard extremely tiny junk (e.g. "a", ".")
-      
-      for (const existing of seenTexts) {
-         if (existing.includes(cleanNew) || cleanNew.includes(existing)) return true;
-      }
-      return false;
-    };
-
-    nodes.each((_, el) => {
-      let rawText = $(el).text().trim();
-      const cleanedText = cleanScrapedText(rawText);
-      if (cleanedText.length < 3) return;
-      
-      const isBoil = isBoilerplate(cleanedText);
-      let images = [];
-      const reviewCard = $(el).closest('article, li, [class*="review"], [class*="card"], [class*="comment"], [class*="item"]');
-      const searchContext = reviewCard.length > 0 ? reviewCard : $(el).parent();
-
-      searchContext.find('img').each((i, img) => {
-        const rawSrc = $(img).attr('data-src') || $(img).attr('src') || $(img).attr('data-lazy-src');
-        const src = resolveUrl(rawSrc, url);
-        if (
-          src &&
-          !src.includes('avatar') && !src.includes('logo') && !src.includes('icon') &&
-          !src.includes('profile') && !images.includes(src)
-        ) {
-          images.push(src);
+        if (text && !seenTexts.has(text.toLowerCase())) {
+          seenTexts.add(text.toLowerCase());
+          reviews.push({ text, rating, author, date, title, images });
         }
       });
+    } else if (isTrustpilot) {
+      $('article[class*="review"]').each((_, el) => {
+        const text = $(el).find('[data-service-review-text-typography]').text().trim();
+        const rating = $(el).find('div[data-service-review-rating] img').attr('alt');
+        const author = $(el).find('span[data-consumer-name-typography]').text().trim();
+        const date = $(el).find('time').attr('datetime');
+        const title = null;
+        
+        let images = [];
+        $(el).find('img').each((_, img) => {
+          const src = resolveUrl($(img).attr('src'), url);
+          if (src && !src.includes('avatar') && !src.includes('consumer')) images.push(src);
+        });
 
-      const text = isBoil && images.length === 0 ? "" : cleanedText;
-      const hasValidText = text.trim().length >= 3;
-      const hasValidImages = images.length > 0;
+        if (text && !seenTexts.has(text.toLowerCase())) {
+          seenTexts.add(text.toLowerCase());
+          reviews.push({ text, rating, author, date, title, images });
+        }
+      });
+    } else {
+      // ─── Generic Fallback ──────────────────────────────────────────────────
+      const primarySelectors = [
+         'article', 'span[data-hook="review-body"]', '[class*="review-content"]',
+         '[class*="review-text"]', '[class*="comment-text"]', '[class*="review-body"]',
+         '[data-testid*="review"]', '.typography_body-l__KUYFJ', '.styles_reviewContent__0Q2Tg',
+         '.review-item', '.comment-content'
+      ].join(', ');
 
-      if (!hasValidText && !hasValidImages) return;
+      let nodes = $(primarySelectors);
 
-      const textLower = text.trim().toLowerCase();
-      if (hasValidText) {
-        if (isSubset(textLower)) return;
-        seenTexts.add(textLower);
+      if (nodes.length === 0) {
+         $('div, span, p').each((_, el) => {
+            const text = $(el).text().trim();
+            if (text.length > 50 && text.length < 2000) {
+               const parent = $(el).parent();
+               if (parent.children().length > 2) nodes = nodes.add(el);
+            }
+         });
       }
 
-      console.log(`[Scraper] Captured Review: "${text.substring(0, 30)}..."`);
+      nodes.each((_, el) => {
+        const rawText = $(el).text().trim();
+        if (rawText.length < 3 || isBoilerplate(rawText)) return;
+        
+        let images = [];
+        const reviewCard = $(el).closest('article, li, [class*="review"], [class*="card"], [class*="comment"], [class*="item"]');
+        const searchContext = reviewCard.length > 0 ? reviewCard : $(el).parent();
 
-      reviews.push({
-        text: text || "[Image-only Customer Review]",
-        images
+        searchContext.find('img').each((i, img) => {
+          const src = resolveUrl($(img).attr('src'), url);
+          if (src && !src.includes('avatar') && !src.includes('logo')) images.push(src);
+        });
+
+        if (!seenTexts.has(rawText.toLowerCase())) {
+          seenTexts.add(rawText.toLowerCase());
+          reviews.push({ text: rawText, rating: null, author: "Anonymous", date: null, title: null, images });
+        }
       });
-    });
+    }
 
     if (reviews.length === 0) {
-       console.warn(`[Scraper] Failed to find reviews at ${url}. HTML Length: ${html.length}`);
-       return res.status(404).json({ error: "Could not find any meaningful review content on this page. The site structure might be too complex or dynamic." });
+       return res.status(404).json({ error: "Could not find any meaningful review content on this page." });
     }
 
     console.log(`[Scraper] Successfully extracted ${reviews.length} reviews from ${url}`);
@@ -272,7 +264,7 @@ app.post('/api/scrape', async (req, res) => {
   }
 });
 
-// ─── HuggingFace Analyze (legacy, keep if still used) ────────────────────────
+// ─── HuggingFace Analyze (legacy) ──────────────────────────
 
 const { HfInference } = require('@huggingface/inference');
 const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
@@ -288,8 +280,6 @@ app.post('/api/analyze', async (req, res) => {
     }
 
     const limitedTexts = texts.slice(0, 500);
-    console.log(`Starting HuggingFace analysis for ${limitedTexts.length} items...`);
-
     const MAX_CONCURRENT = 25;
     let results = new Array(limitedTexts.length).fill(null);
 
@@ -327,10 +317,7 @@ app.post('/api/analyze', async (req, res) => {
       });
 
       await Promise.all(batchParams);
-
-      if (i + MAX_CONCURRENT < limitedTexts.length) {
-        await new Promise(r => setTimeout(r, 600));
-      }
+      if (i + MAX_CONCURRENT < limitedTexts.length) await new Promise(r => setTimeout(r, 600));
     }
 
     res.json({ results });
